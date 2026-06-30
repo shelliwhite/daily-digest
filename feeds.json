@@ -1,0 +1,31 @@
+{
+  "categories": [
+    {
+      "name": "Finance",
+      "feeds": [
+        {
+          "name": "Example Finance Newsletter",
+          "url": "https://kill-the-newsletter.com/feeds/REPLACE_ME.xml"
+        }
+      ]
+    },
+    {
+      "name": "Tech",
+      "feeds": [
+        {
+          "name": "Example Tech Blog",
+          "url": "https://example.com/rss.xml"
+        }
+      ]
+    },
+    {
+      "name": "Travel",
+      "feeds": [
+        {
+          "name": "Example Travel Newsletter",
+          "url": "https://kill-the-newsletter.com/feeds/REPLACE_ME2.xml"
+        }
+      ]
+    }
+  ]
+}
