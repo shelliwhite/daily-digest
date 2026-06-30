@@ -5,7 +5,7 @@ A self-hosted, auto-updating daily digest of your newsletters and RSS feeds, gro
 ## How it works
 
 1. `feeds.json` lists your sources, grouped into categories.
-2. `generate.py` fetches each feed, pulls entries from the last 2 days, and renders `index.html`.
+2. `generate.py` fetches each feed, pulls entries from the last day, and renders `index.html`.
 3. A GitHub Action runs `generate.py` daily at 17:00 UTC and commits the updated page.
 4. GitHub Pages serves `index.html` at your public URL.
 
