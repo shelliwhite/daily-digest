@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
 
-LOOKBACK_DAYS = 2
+LOOKBACK_DAYS = 1
 FEEDS_FILE = "feeds.json"
 OUTPUT_FILE = "index.html"
 MAX_SUMMARY_LEN = 220
