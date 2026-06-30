@@ -6,7 +6,7 @@ A self-hosted, auto-updating daily digest of your newsletters and RSS feeds, gro
 
 1. `feeds.json` lists your sources, grouped into categories.
 2. `generate.py` fetches each feed, pulls entries from the last 2 days, and renders `index.html`.
-3. A GitHub Action runs `generate.py` daily at 12:00 UTC and commits the updated page.
+3. A GitHub Action runs `generate.py` daily at 17:00 UTC and commits the updated page.
 4. GitHub Pages serves `index.html` at your public URL.
 
 ## One-time setup
@@ -55,7 +55,7 @@ Replace the placeholder entries with your real sources, grouped under whatever c
 
 ## Customizing
 
-- **Lookback window**: change `LOOKBACK_DAYS = 2` in `generate.py`.
+- **Lookback window**: change `LOOKBACK_DAYS = 1` in `generate.py`.
 - **Schedule time**: change the cron line in `.github/workflows/digest.yml` (currently `0 12 * * *` = 12:00 UTC daily).
 - **Styling**: all CSS is inline in the `render_html()` function in `generate.py` — colors, fonts, card layout, etc. are all editable there.
 - **Summary length**: `MAX_SUMMARY_LEN = 220` controls how much of each entry's description shows on the card.
