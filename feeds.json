@@ -1,29 +1,24 @@
 {
   "categories": [
     {
-      "name": "Finance",
+      "name": "News",
       "feeds": [
         {
-          "name": "Example Finance Newsletter",
-          "url": "https://kill-the-newsletter.com/feeds/REPLACE_ME.xml"
-        }
+          "name": "Morning Brew",
+          "url": "https://kill-the-newsletter.com/feeds/xsbxllkpix791vdhtncj.xml"
+        },
+        {
+          "name": "AP News - The Morning Wire",
+          "url": "https://kill-the-newsletter.com/feeds/2c2ifg0tg0uc5gxvb1jc.xml"
+        },
       ]
     },
     {
-      "name": "Tech",
+      "name": "Books",
       "feeds": [
         {
-          "name": "Example Tech Blog",
-          "url": "https://example.com/rss.xml"
-        }
-      ]
-    },
-    {
-      "name": "Travel",
-      "feeds": [
-        {
-          "name": "Example Travel Newsletter",
-          "url": "https://kill-the-newsletter.com/feeds/REPLACE_ME2.xml"
+          "name": "The Book Riot Newsletter",
+          "url": "https://kill-the-newsletter.com/feeds/69kjguypy9oydpsgr35p.xml"
         }
       ]
     }
