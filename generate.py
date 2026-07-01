@@ -20,9 +20,24 @@ LOOKBACK_DAYS = 1
 FEEDS_FILE = "feeds.json"
 OUTPUT_FILE = "index.html"
 MAX_SUMMARY_LEN = 300       # chars shown in collapsed preview
-MAX_FULL_LEN = 6000         # chars stored for full expanded view
+MAX_FULL_LEN = 6000         # chars stored for full expanded view (plain text only)
 FETCH_WORKERS = 6           # parallel article fetches
 USER_AGENT = "Mozilla/5.0 (compatible; NewsletterDigestBot/1.0)"
+
+# Tags allowed to pass through sanitize_html (everything else is stripped)
+ALLOWED_TAGS = {
+    "p", "br", "b", "strong", "i", "em", "u", "s", "strike",
+    "h1", "h2", "h3", "h4",
+    "ul", "ol", "li",
+    "a", "img",
+    "blockquote", "hr", "div", "span", "table", "tr", "td", "th", "tbody", "thead",
+}
+
+# Attributes allowed per tag (others stripped to prevent style/script injection)
+ALLOWED_ATTRS = {
+    "a":   {"href", "title"},
+    "img": {"src", "alt", "width", "height"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -44,72 +59,11 @@ def fetch_url(url, timeout=30, retries=2):
 
 
 # ---------------------------------------------------------------------------
-# Content extraction  —  TWO implementations, swap by commenting one block
-# ---------------------------------------------------------------------------
-
-# ── ACTIVE: newspaper3k ────────────────────────────────────────────────────
-# Requires: pip install newspaper3k  (added to digest.yml workflow)
-def extract_full_content(url):
-    """Fetch and extract article body using newspaper3k."""
-    try:
-        from newspaper import Article
-        article = Article(url)
-        article.download()
-        article.parse()
-        text = article.text.strip()
-        char_count = len(text)
-        if char_count < 100:
-            print(f"    [debug] {url[:60]} — extracted {char_count} chars (below 100 threshold, skipped)")
-            return ""
-        # Trim to max length at a sentence boundary
-        if char_count > MAX_FULL_LEN:
-            text = text[:MAX_FULL_LEN].rsplit(". ", 1)[0] + "."
-        print(f"    [debug] {url[:60]} — extracted {char_count} chars OK")
-        return text
-    except Exception as ex:
-        print(f"    [debug] {url[:60]} — exception: {ex}")
-        return ""
-
-
-# ── COMMENTED OUT: lightweight custom extractor (no pip dependency) ────────
-# To switch: comment the newspaper3k block above and uncomment this block.
-# Also remove the `pip install newspaper3k` step from digest.yml.
-#
-# def extract_full_content(url):
-#     """Fetch and extract article body using standard library only."""
-#     try:
-#         raw = fetch_url(url, timeout=12).decode("utf-8", errors="ignore")
-#         # Strip <style>, <script>, <nav>, <footer>, <header> blocks
-#         for tag in ("style", "script", "nav", "footer", "header", "aside"):
-#             raw = re.sub(
-#                 rf"<{tag}[^>]*>.*?</{tag}>", " ", raw,
-#                 flags=re.DOTALL | re.IGNORECASE
-#             )
-#         # Collect all <p> tag content
-#         paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", raw, re.DOTALL | re.IGNORECASE)
-#         # Strip inner tags and unescape
-#         cleaned = []
-#         for p in paragraphs:
-#             t = re.sub(r"<[^>]+>", " ", p)
-#             t = html.unescape(t)
-#             t = re.sub(r"\s+", " ", t).strip()
-#             if len(t) > 40:   # skip nav links, captions, etc.
-#                 cleaned.append(t)
-#         text = "\n\n".join(cleaned)
-#         if len(text) < 100:
-#             return ""
-#         if len(text) > MAX_FULL_LEN:
-#             text = text[:MAX_FULL_LEN].rsplit(". ", 1)[0] + "."
-#         return text
-#     except Exception:
-#         return ""
-
-
-# ---------------------------------------------------------------------------
 # HTML utilities
 # ---------------------------------------------------------------------------
 
 def strip_html(raw):
+    """Remove all HTML tags, returning plain text."""
     if not raw:
         return ""
     text = re.sub(r"<style[^>]*>.*?</style>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
@@ -122,10 +76,181 @@ def strip_html(raw):
     return text
 
 
+def sanitize_html(raw):
+    """
+    Sanitize email HTML for safe inline display, preserving images and formatting.
+
+    - Removes <style>, <script>, <head>, <html>, <body> wrapper tags
+    - Strips tracking pixels (images 1-3px wide/tall or explicitly 1x1)
+    - Keeps allowed tags (see ALLOWED_TAGS), strips the rest but keeps their text
+    - On allowed tags, keeps only safe attributes (see ALLOWED_ATTRS)
+    - Strips all inline style= attributes to prevent email CSS bleeding into the digest
+    - Makes relative URLs absolute where possible (skips them otherwise)
+    """
+    if not raw:
+        return ""
+
+    # Remove full block elements we never want
+    for tag in ("style", "script", "head"):
+        raw = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
+
+    # Unwrap <html> and <body> wrapper tags (keep their contents)
+    for tag in ("html", "body"):
+        raw = re.sub(rf"</?{tag}[^>]*>", "", raw, flags=re.IGNORECASE)
+
+    def process_tag(m):
+        full_tag = m.group(0)
+        # Closing tag — allow if tag is allowed
+        if full_tag.startswith("</"):
+            tag_name = re.match(r"</\s*(\w+)", full_tag)
+            if tag_name and tag_name.group(1).lower() in ALLOWED_TAGS:
+                return f"</{tag_name.group(1).lower()}>"
+            return ""
+
+        # Self-closing or opening tag
+        tag_match = re.match(r"<\s*(\w+)", full_tag)
+        if not tag_match:
+            return ""
+        tag_name = tag_match.group(1).lower()
+
+        if tag_name not in ALLOWED_TAGS:
+            return ""  # strip tag entirely (text content still flows through)
+
+        # Parse attributes
+        attrs_raw = full_tag[len(tag_match.group(0)):]
+        allowed = ALLOWED_ATTRS.get(tag_name, set())
+        kept_attrs = []
+
+        for attr_m in re.finditer(r'(\w[\w-]*)(?:\s*=\s*(?:"([^"]*)"\'([^\']*)\'|(\S+)))?', attrs_raw):
+            attr_name = attr_m.group(1).lower()
+            attr_val = attr_m.group(2) or attr_m.group(3) or attr_m.group(4) or ""
+
+            if attr_name not in allowed:
+                continue
+
+            # Block javascript: hrefs
+            if attr_name == "href" and attr_val.strip().lower().startswith("javascript:"):
+                continue
+
+            # Filter tracking pixels on img tags
+            if tag_name == "img" and attr_name in ("width", "height"):
+                try:
+                    if int(attr_val) <= 3:
+                        return ""  # drop the whole img tag
+                except ValueError:
+                    pass
+
+            kept_attrs.append(f'{attr_name}="{html.escape(attr_val)}"')
+
+        # For imgs, also check for common 1x1 tracking patterns in src
+        if tag_name == "img":
+            src_m = re.search(r'src\s*=\s*["\']?([^"\'>\s]+)', full_tag, re.IGNORECASE)
+            if src_m:
+                src = src_m.group(1).lower()
+                if any(x in src for x in ("pixel", "track", "beacon", "open.php", "1x1")):
+                    return ""
+
+        self_closing = "/" in full_tag[-3:] or tag_name in ("img", "br", "hr")
+        attrs_str = (" " + " ".join(kept_attrs)) if kept_attrs else ""
+        return f"<{tag_name}{attrs_str}{'/' if self_closing else ''}>"
+
+    sanitized = re.sub(r"<[^>]+>", process_tag, raw)
+
+    # Collapse excessive whitespace but preserve paragraph breaks
+    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
+    sanitized = re.sub(r"[ \t]+", " ", sanitized)
+    return sanitized.strip()
+
+
 def truncate(text, length):
     if len(text) <= length:
         return text
     return text[:length].rsplit(" ", 1)[0] + "…"
+
+
+# ---------------------------------------------------------------------------
+# Content extraction  —  TWO implementations, swap by commenting one block
+# ---------------------------------------------------------------------------
+
+# ── ACTIVE: newspaper3k ────────────────────────────────────────────────────
+# Requires: pip install newspaper3k lxml_html_clean  (in requirements.txt)
+def extract_full_content(url, feed_content=""):
+    """Fetch and extract article body.
+
+    For Kill the Newsletter feeds, the full email HTML is already in the RSS
+    feed — we sanitize it directly (preserving images) rather than fetching
+    their slow servers.
+    For all other sources, newspaper3k fetches and extracts plain text.
+
+    Returns a tuple: (content: str, is_html: bool)
+    """
+    # Kill the Newsletter: sanitize feed HTML directly, images and all
+    if "kill-the-newsletter.com" in url and feed_content:
+        sanitized = sanitize_html(feed_content)
+        plain_len = len(strip_html(feed_content))
+        if plain_len >= 100:
+            print(f"    [debug] {url[:60]} — sanitized feed HTML ({plain_len} plain chars)")
+            return sanitized, True
+        print(f"    [debug] {url[:60]} — feed content too short ({plain_len} chars)")
+        return "", False
+
+    # All other sources: fetch via newspaper3k (returns plain text)
+    try:
+        from newspaper import Article
+        article = Article(url)
+        article.download()
+        article.parse()
+        text = article.text.strip()
+        char_count = len(text)
+        if char_count < 100:
+            print(f"    [debug] {url[:60]} — extracted {char_count} chars (below threshold, skipped)")
+            return "", False
+        if char_count > MAX_FULL_LEN:
+            text = text[:MAX_FULL_LEN].rsplit(". ", 1)[0] + "."
+        print(f"    [debug] {url[:60]} — extracted {char_count} chars OK")
+        return text, False
+    except Exception as ex:
+        print(f"    [debug] {url[:60]} — exception: {ex}")
+        return "", False
+
+
+# ── COMMENTED OUT: lightweight custom extractor (no pip dependency) ────────
+# To switch: comment the newspaper3k block above and uncomment this block.
+# Also remove newspaper3k and lxml_html_clean from requirements.txt.
+#
+# def extract_full_content(url, feed_content=""):
+#     """Fetch and extract article body using standard library only."""
+#     # Kill the Newsletter: sanitize feed HTML directly
+#     if "kill-the-newsletter.com" in url and feed_content:
+#         sanitized = sanitize_html(feed_content)
+#         plain_len = len(strip_html(feed_content))
+#         if plain_len >= 100:
+#             return sanitized, True
+#         return "", False
+#     # All other sources: extract <p> blocks from fetched page
+#     try:
+#         raw = fetch_url(url, timeout=12).decode("utf-8", errors="ignore")
+#         for tag in ("style", "script", "nav", "footer", "header", "aside"):
+#             raw = re.sub(
+#                 rf"<{tag}[^>]*>.*?</{tag}>", " ", raw,
+#                 flags=re.DOTALL | re.IGNORECASE
+#             )
+#         paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", raw, re.DOTALL | re.IGNORECASE)
+#         cleaned = []
+#         for p in paragraphs:
+#             t = re.sub(r"<[^>]+>", " ", p)
+#             t = html.unescape(t)
+#             t = re.sub(r"\s+", " ", t).strip()
+#             if len(t) > 40:
+#                 cleaned.append(t)
+#         text = "\n\n".join(cleaned)
+#         if len(text) < 100:
+#             return "", False
+#         if len(text) > MAX_FULL_LEN:
+#             text = text[:MAX_FULL_LEN].rsplit(". ", 1)[0] + "."
+#         return text, False
+#     except Exception:
+#         return "", False
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +298,11 @@ def parse_feed(xml_bytes, source_name):
                 "title": html.unescape(title) or "(untitled)",
                 "link": link,
                 "summary": truncate(strip_html(desc), MAX_SUMMARY_LEN),
+                "feed_content": desc,
                 "date": parse_date(item.findtext("pubDate") or item.findtext("date")),
                 "source": source_name,
                 "full_content": "",
+                "full_is_html": False,
             })
     else:
         ns = {"a": "http://www.w3.org/2005/Atom"}
@@ -196,9 +323,11 @@ def parse_feed(xml_bytes, source_name):
                 "title": html.unescape(title) or "(untitled)",
                 "link": link,
                 "summary": truncate(strip_html(summary), MAX_SUMMARY_LEN),
+                "feed_content": summary,
                 "date": parse_date(pub),
                 "source": source_name,
                 "full_content": "",
+                "full_is_html": False,
             })
 
     return entries
@@ -240,7 +369,7 @@ def collect_entries(feeds_config):
         print(f"\nFetching full content for {len(all_recent)} articles...")
         with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
             future_to_entry = {
-                pool.submit(extract_full_content, e["link"]): e
+                pool.submit(extract_full_content, e["link"], e.get("feed_content", "")): e
                 for e in all_recent
                 if e["link"]
             }
@@ -248,10 +377,13 @@ def collect_entries(feeds_config):
             for future in as_completed(future_to_entry):
                 entry = future_to_entry[future]
                 try:
-                    entry["full_content"] = future.result()
+                    content, is_html = future.result()
+                    entry["full_content"] = content
+                    entry["full_is_html"] = is_html
                 except Exception as ex:
                     print(f"  [warn] future exception for {entry.get('link','?')[:60]}: {ex}")
                     entry["full_content"] = ""
+                    entry["full_is_html"] = False
                 done += 1
                 if done % 5 == 0 or done == len(future_to_entry):
                     print(f"  {done}/{len(future_to_entry)} articles fetched")
@@ -282,31 +414,29 @@ def render_html(categories):
             date_str = e["date"].strftime("%b %d") if e["date"] else ""
             summary = e["summary"]
             full = e["full_content"]
-
-            # Escape content for embedding in data attribute (JSON-safe)
-            full_escaped = html.escape(full, quote=True) if full else ""
+            is_html = e.get("full_is_html", False)
 
             if full:
-                # Card has full content: show preview + expand toggle
-                preview = summary or truncate(full, MAX_SUMMARY_LEN)
+                preview = summary or truncate(strip_html(full) if is_html else full, MAX_SUMMARY_LEN)
+                # Render full content as HTML or plain text depending on source
+                full_inner = full if is_html else html.escape(full)
+                full_class = "card-full-html" if is_html else "card-full-text"
                 content_block = f"""
               <p class="card-preview" id="{cid}-preview">{html.escape(preview)}</p>
               <div class="card-full" id="{cid}-full" hidden>
-                <div class="card-full-text">{html.escape(full)}</div>
+                <div class="{full_class}">{full_inner}</div>
               </div>
               <div class="card-actions">
                 <button class="btn-expand" onclick="toggleExpand(event, '{cid}')">Read more</button>
                 <a class="btn-link" href="{html.escape(e['link'])}" target="_blank" rel="noopener">Open ↗</a>
               </div>"""
             elif summary:
-                # Card has RSS summary only, no full content
                 content_block = f"""
               <p class="card-preview">{html.escape(summary)}</p>
               <div class="card-actions">
                 <a class="btn-link" href="{html.escape(e['link'])}" target="_blank" rel="noopener">Open ↗</a>
               </div>"""
             else:
-                # Nothing extracted at all
                 content_block = f"""
               <div class="card-actions">
                 <a class="btn-link" href="{html.escape(e['link'])}" target="_blank" rel="noopener">Open ↗</a>
@@ -409,15 +539,64 @@ def render_html(categories):
   .card-title {{ font-size: 1.05rem; margin: 0; line-height: 1.3; font-weight: 600; }}
   .card-preview {{ font-size: 0.88rem; color: var(--ink-soft); margin: 0; }}
   .card-full {{ margin-top: 4px; border-top: 1px solid var(--border); padding-top: 12px; }}
+
+  /* Plain text content (newspaper3k sources) */
   .card-full-text {{
     font-size: 0.9rem;
     line-height: 1.7;
     color: var(--ink);
     white-space: pre-wrap;
-    max-height: 420px;
+    max-height: 520px;
     overflow-y: auto;
     padding-right: 4px;
   }}
+
+  /* Sanitized HTML content (Kill the Newsletter sources) */
+  .card-full-html {{
+    font-size: 0.9rem;
+    line-height: 1.7;
+    color: var(--ink);
+    max-height: 520px;
+    overflow-y: auto;
+    padding-right: 4px;
+    overflow-x: hidden;
+  }}
+  /* Tame email images so they don't overflow the card */
+  .card-full-html img {{
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 8px 0;
+    border-radius: 4px;
+  }}
+  /* Rein in email table layouts */
+  .card-full-html table {{
+    width: 100% !important;
+    max-width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }}
+  .card-full-html td,
+  .card-full-html th {{
+    padding: 4px 8px;
+    word-break: break-word;
+    vertical-align: top;
+  }}
+  /* Tone down email headings so they don't dominate the card */
+  .card-full-html h1 {{ font-size: 1.15rem; margin: 12px 0 6px; }}
+  .card-full-html h2 {{ font-size: 1.05rem; margin: 10px 0 4px; }}
+  .card-full-html h3 {{ font-size: 0.95rem; margin: 8px 0 4px; }}
+  .card-full-html p  {{ margin: 0 0 8px; }}
+  .card-full-html a  {{ color: var(--accent); }}
+  .card-full-html blockquote {{
+    border-left: 3px solid var(--border);
+    margin: 8px 0;
+    padding: 4px 12px;
+    color: var(--ink-soft);
+    font-style: italic;
+  }}
+
   .card-actions {{
     display: flex;
     align-items: center;
