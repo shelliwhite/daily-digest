@@ -16,8 +16,7 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0;
-    padding: 0;
+    margin: 0; padding: 0;
     background: var(--bg);
     color: var(--ink);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -35,19 +34,9 @@
     margin: 0 0 8px;
     letter-spacing: -0.02em;
   }
-  header p {
-    color: var(--ink-soft);
-    font-size: 0.9rem;
-    margin: 0;
-  }
-  main {
-    max-width: 1100px;
-    margin: 0 auto;
-    padding: 40px 24px 80px;
-  }
-  .category {
-    margin-bottom: 48px;
-  }
+  header p { color: var(--ink-soft); font-size: 0.9rem; margin: 0; }
+  main { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+  .category { margin-bottom: 48px; }
   .category-title {
     font-family: Georgia, "Times New Roman", serif;
     font-size: 1.4rem;
@@ -58,24 +47,20 @@
   }
   .card-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 18px;
+    align-items: start;
   }
   .card {
     background: var(--card-bg);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 20px;
-    text-decoration: none;
     color: inherit;
     box-shadow: var(--shadow);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
     display: flex;
     flex-direction: column;
-  }
-  .card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+    gap: 8px;
   }
   .card-meta {
     display: flex;
@@ -84,42 +69,52 @@
     color: var(--accent);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-bottom: 10px;
     font-weight: 600;
   }
-  .card-date {
+  .card-date { color: var(--ink-soft); font-weight: 400; text-transform: none; }
+  .card-title { font-size: 1.05rem; margin: 0; line-height: 1.3; font-weight: 600; }
+  .card-preview { font-size: 0.88rem; color: var(--ink-soft); margin: 0; }
+  .card-full { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .card-full-text {
+    font-size: 0.9rem;
+    line-height: 1.7;
+    color: var(--ink);
+    white-space: pre-wrap;
+    max-height: 420px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .card-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 4px;
+  }
+  .btn-expand {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--accent);
+    cursor: pointer;
+    letter-spacing: 0.01em;
+  }
+  .btn-expand:hover { text-decoration: underline; }
+  .btn-link {
+    font-size: 0.82rem;
     color: var(--ink-soft);
-    font-weight: 400;
-    text-transform: none;
+    text-decoration: none;
   }
-  .card-title {
-    font-size: 1.05rem;
-    margin: 0 0 8px;
-    line-height: 1.3;
-  }
-  .card-summary {
-    font-size: 0.88rem;
-    color: var(--ink-soft);
-    margin: 0;
-    flex-grow: 1;
-  }
-  .empty {
-    text-align: center;
-    color: var(--ink-soft);
-    padding: 80px 0;
-  }
-  footer {
-    text-align: center;
-    padding: 24px;
-    color: var(--ink-soft);
-    font-size: 0.8rem;
-  }
+  .btn-link:hover { color: var(--ink); text-decoration: underline; }
+  .empty { text-align: center; color: var(--ink-soft); padding: 80px 0; }
+  footer { text-align: center; padding: 24px; color: var(--ink-soft); font-size: 0.8rem; }
 </style>
 </head>
 <body>
 <header>
   <h1>Daily Digest</h1>
-  <p>Generated June 30, 2026 at 18:56 UTC · last 1 days</p>
+  <p>Generated July 01, 2026 at 03:21 UTC · last 1 days</p>
 </header>
 <main>
 
@@ -127,63 +122,76 @@
           <h2 class="category-title">News</h2>
           <div class="card-grid">
             
-            <a class="card" href="https://kill-the-newsletter.com/feeds/xsbxllkpix791vdhtncj/entries/8ry8prhzvlf8s8xo4o6w.html" target="_blank" rel="noopener">
+            <div class="card" id="card-1">
               <div class="card-meta">
                 <span class="card-source">Morning Brew</span>
                 <span class="card-date">Jun 30</span>
               </div>
               <h3 class="card-title">☕️ Caution: Morning Brew coming in hot</h3>
-              <p class="card-summary">96 *{box-sizing:border-box}body{margin:0;padding:0}a[x-apple-data-detectors]{color:inherit!important;text-decoration:inherit!important}#MessageViewBody…</p>
-            </a>
-            <a class="card" href="https://kill-the-newsletter.com/feeds/2c2ifg0tg0uc5gxvb1jc/entries/j7g8btu7vqysdhdng458.html" target="_blank" rel="noopener">
+              
+              <p class="card-preview">96 Thanks for signing up for Morning Brew Today is a big day. You are now part of the Brew Crew. As a subscriber, you have access to—according to our very proud parents—the best darn newsletter covering the business world, the tech world, the finance world, and the world world. It’s a lot of power,…</p>
+              <div class="card-actions">
+                <a class="btn-link" href="https://kill-the-newsletter.com/feeds/xsbxllkpix791vdhtncj/entries/8ry8prhzvlf8s8xo4o6w.html" target="_blank" rel="noopener">Open ↗</a>
+              </div>
+            </div>
+            <div class="card" id="card-2">
               <div class="card-meta">
                 <span class="card-source">AP News - The Morning Wire</span>
                 <span class="card-date">Jun 30</span>
               </div>
               <h3 class="card-title">Welcome to The Morning Wire</h3>
-              <p class="card-summary">96 *{box-sizing:border-box}body{margin:0;padding:0}a[x-apple-data-detectors]{color:inherit!important;text-decoration:inherit!important}#MessageViewBody…</p>
-            </a>
-            <a class="card" href="https://kill-the-newsletter.com/feeds/xsbxllkpix791vdhtncj/entries/unag0seglllnlu9hkuve.html" target="_blank" rel="noopener">
+              
+              <p class="card-preview">96 AP News delivered to your inbox Thank you for signing up for The Morning Wire. Here&#x27;s what you can expect from us every Sunday-Friday morning: A rundown of the top news of the day from AP News. Selections of our best photography. Behind-the-scenes glimpses into the process — and people —…</p>
+              <div class="card-actions">
+                <a class="btn-link" href="https://kill-the-newsletter.com/feeds/2c2ifg0tg0uc5gxvb1jc/entries/j7g8btu7vqysdhdng458.html" target="_blank" rel="noopener">Open ↗</a>
+              </div>
+            </div>
+            <div class="card" id="card-3">
               <div class="card-meta">
                 <span class="card-source">Morning Brew</span>
                 <span class="card-date">Jun 30</span>
               </div>
               <h3 class="card-title">☕️ Morning Brew (almost) coming in hot</h3>
-              <p class="card-summary">96 *{box-sizing:border-box}body{margin:0;padding:0}a[x-apple-data-detectors]{color:inherit!important;text-decoration:inherit!important}#MessageViewBody…</p>
-            </a>
+              
+              <p class="card-preview">96 Confirm your subscription We&#x27;re Morning Brew—the daily newsletter that makes reading the news actually enjoyable. You opted in to receive the Morning Brew. Hit the button below to confirm your subscription and never miss out on the latest business news again. Confirm Email Cheers, ☕️ The Brew…</p>
+              <div class="card-actions">
+                <a class="btn-link" href="https://kill-the-newsletter.com/feeds/xsbxllkpix791vdhtncj/entries/unag0seglllnlu9hkuve.html" target="_blank" rel="noopener">Open ↗</a>
+              </div>
+            </div>
           </div>
         </section>
         <section class="category">
           <h2 class="category-title">Books</h2>
           <div class="card-grid">
             
-            <a class="card" href="https://kill-the-newsletter.com/feeds/69kjguypy9oydpsgr35p/entries/pbegdh9s48p1zyzmuket.html" target="_blank" rel="noopener">
+            <div class="card" id="card-4">
               <div class="card-meta">
                 <span class="card-source">The Book Riot Newsletter</span>
                 <span class="card-date">Jun 30</span>
               </div>
               <h3 class="card-title">📚 You&#x27;re officially a Rioter. Welcome!</h3>
-              <p class="card-summary">ReadMsgBody{ width: 100%;} .ExternalClass {width: 100%;} .ExternalClass, .ExternalClass p, .ExternalClass span, .ExternalClass font, .ExternalClass td, .ExternalClass div {line-height: 100%;} body…</p>
-            </a>
-            <a class="card" href="https://kill-the-newsletter.com/feeds/q8rq31ktoos9btc95r08/entries/8f4fhfx0pzdcgslco1jp.html" target="_blank" rel="noopener">
-              <div class="card-meta">
-                <span class="card-source">Latine Lit</span>
-                <span class="card-date">Jun 30</span>
+              
+              <p class="card-preview">96 Get Book Riot emails in your primary inbox. Today is huge! You’ve joined A LOT of like-minded readers in getting the best newsletters covering the book, comics, and publishing worlds. “Always Books, Never Boring” is our goal every day. Let&#x27;s make sure our newsletters go straight to your inbox.…</p>
+              <div class="card-actions">
+                <a class="btn-link" href="https://kill-the-newsletter.com/feeds/69kjguypy9oydpsgr35p/entries/pbegdh9s48p1zyzmuket.html" target="_blank" rel="noopener">Open ↗</a>
               </div>
-              <h3 class="card-title">📚 You&#x27;re officially a Rioter. Welcome!</h3>
-              <p class="card-summary">ReadMsgBody{ width: 100%;} .ExternalClass {width: 100%;} .ExternalClass, .ExternalClass p, .ExternalClass span, .ExternalClass font, .ExternalClass td, .ExternalClass div {line-height: 100%;} body…</p>
-            </a>
-            <a class="card" href="https://kill-the-newsletter.com/feeds/q8rq31ktoos9btc95r08/entries/11xaocerlniktw19a9vr.html" target="_blank" rel="noopener">
-              <div class="card-meta">
-                <span class="card-source">Latine Lit</span>
-                <span class="card-date">Jun 30</span>
-              </div>
-              <h3 class="card-title">Test Email</h3>
-              <p class="card-summary">P {margin-top:0;margin-bottom:0;} Testing the new feed Kill the Newsletter! feed settings</p>
-            </a>
+            </div>
           </div>
         </section>
 </main>
 <footer>Auto-generated by GitHub Actions</footer>
+<script>
+function toggleExpand(evt, cid) {
+  evt.preventDefault();
+  var btn = evt.target;
+  var preview = document.getElementById(cid + '-preview');
+  var full = document.getElementById(cid + '-full');
+  if (!full) return;
+  var expanded = !full.hidden;
+  full.hidden = expanded;
+  if (preview) preview.style.display = expanded ? '' : 'none';
+  btn.textContent = expanded ? 'Read more' : 'Collapse';
+}
+</script>
 </body>
 </html>
