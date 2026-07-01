@@ -29,10 +29,18 @@ USER_AGENT = "Mozilla/5.0 (compatible; NewsletterDigestBot/1.0)"
 # HTTP
 # ---------------------------------------------------------------------------
 
-def fetch_url(url, timeout=15):
+def fetch_url(url, timeout=30, retries=2):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+            if attempt < retries:
+                print(f"  [retry {attempt}] {url[:60]}: {e}")
+    raise last_err
 
 
 # ---------------------------------------------------------------------------
