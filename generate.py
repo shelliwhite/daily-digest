@@ -49,13 +49,17 @@ def extract_full_content(url):
         article.download()
         article.parse()
         text = article.text.strip()
-        if len(text) < 100:
+        char_count = len(text)
+        if char_count < 100:
+            print(f"    [debug] {url[:60]} — extracted {char_count} chars (below 100 threshold, skipped)")
             return ""
         # Trim to max length at a sentence boundary
-        if len(text) > MAX_FULL_LEN:
+        if char_count > MAX_FULL_LEN:
             text = text[:MAX_FULL_LEN].rsplit(". ", 1)[0] + "."
+        print(f"    [debug] {url[:60]} — extracted {char_count} chars OK")
         return text
-    except Exception:
+    except Exception as ex:
+        print(f"    [debug] {url[:60]} — exception: {ex}")
         return ""
 
 
@@ -237,11 +241,15 @@ def collect_entries(feeds_config):
                 entry = future_to_entry[future]
                 try:
                     entry["full_content"] = future.result()
-                except Exception:
+                except Exception as ex:
+                    print(f"  [warn] future exception for {entry.get('link','?')[:60]}: {ex}")
                     entry["full_content"] = ""
                 done += 1
                 if done % 5 == 0 or done == len(future_to_entry):
                     print(f"  {done}/{len(future_to_entry)} articles fetched")
+
+        with_content = sum(1 for e in all_recent if e["full_content"])
+        print(f"  {with_content}/{len(all_recent)} articles had extractable content")
 
     return categories
 
