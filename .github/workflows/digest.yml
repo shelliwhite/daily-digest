@@ -2,7 +2,7 @@ name: Generate Daily Digest
 
 on:
   schedule:
-    # Runs daily at 12:00 UTC. Adjust as you like.
+    # Runs daily at 17:00 UTC. Adjust as you like.
     - cron: "0 17 * * *"
   workflow_dispatch: {}  # lets you trigger manually from the Actions tab
 
