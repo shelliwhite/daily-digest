@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: pip install newspaper3k
+
       - name: Generate digest
         run: python generate.py
 
