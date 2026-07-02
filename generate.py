@@ -178,19 +178,18 @@ def extract_full_content(url, feed_content=""):
     """Fetch and extract article body.
 
     For Kill the Newsletter feeds, the full email HTML is already in the RSS
-    feed — we sanitize it directly (preserving images) rather than fetching
-    their slow servers.
+    feed — inject it raw into a sandboxed iframe so it renders exactly as the
+    sender designed it. The iframe sandbox handles isolation; no sanitization needed.
     For all other sources, newspaper3k fetches and extracts plain text.
 
     Returns a tuple: (content: str, is_html: bool)
     """
-    # Kill the Newsletter: sanitize feed HTML directly, images and all
+    # Kill the Newsletter: use raw feed HTML directly — iframe sandbox handles isolation
     if "kill-the-newsletter.com" in url and feed_content:
-        sanitized = sanitize_html(feed_content)
         plain_len = len(strip_html(feed_content))
         if plain_len >= 100:
-            print(f"    [debug] {url[:60]} — sanitized feed HTML ({plain_len} plain chars)")
-            return sanitized, True
+            print(f"    [debug] {url[:60]} — raw feed HTML ({plain_len} plain chars)")
+            return feed_content, True
         print(f"    [debug] {url[:60]} — feed content too short ({plain_len} chars)")
         return "", False
 
@@ -418,13 +417,45 @@ def render_html(categories):
 
             if full:
                 preview = summary or truncate(strip_html(full) if is_html else full, MAX_SUMMARY_LEN)
-                # Render full content as HTML or plain text depending on source
-                full_inner = full if is_html else html.escape(full)
-                full_class = "card-full-html" if is_html else "card-full-text"
+                if is_html:
+                    # Wrap in sandboxed srcdoc iframe so newsletter renders with
+                    # its own layout but cannot affect the digest page.
+                    # Auto-resize JS runs inside the iframe and posts height to parent.
+                    iframe_doc = (
+                        "<!DOCTYPE html><html><head>"
+                        "<meta charset=\"UTF-8\">"
+                        "<style>"
+                        "html,body{margin:0;padding:8px;font-family:sans-serif;"
+                        "font-size:14px;line-height:1.5;}"
+                        "img{max-width:100%;height:auto;}"
+                        "table{max-width:100%;width:100%!important;table-layout:fixed;}"
+                        "td,th{word-break:break-word;}"
+                        "a{color:#c1492d;}"
+                        "</style>"
+                        f"<script>"
+                        f"window.addEventListener('load',function(){{"
+                        f"  var h=document.documentElement.scrollHeight;"
+                        f"  parent.postMessage({{type:'resize',id:'{cid}',h:h}},'*');"
+                        f"}});"
+                        f"</script>"
+                        "</head><body>"
+                        + full +
+                        "</body></html>"
+                    )
+                    srcdoc = html.escape(iframe_doc, quote=True)
+                    full_block = (
+                        f'<iframe id="{cid}-iframe" srcdoc="{srcdoc}"'
+                        f' sandbox="allow-popups allow-popups-to-escape-sandbox"'
+                        f' style="width:100%;border:none;min-height:200px;max-height:600px;"'
+                        f' loading="lazy"></iframe>'
+                    )
+                else:
+                    full_block = f'<div class="card-full-text">{html.escape(full)}</div>'
+
                 content_block = f"""
               <p class="card-preview" id="{cid}-preview">{html.escape(preview)}</p>
               <div class="card-full" id="{cid}-full" hidden>
-                <div class="{full_class}">{full_inner}</div>
+                {full_block}
               </div>
               <div class="card-actions">
                 <button class="btn-expand" onclick="toggleExpand(event, '{cid}')">Read more</button>
@@ -645,6 +676,15 @@ function toggleExpand(evt, cid) {{
   if (preview) preview.style.display = expanded ? '' : 'none';
   btn.textContent = expanded ? 'Read more' : 'Collapse';
 }}
+
+// Auto-resize srcdoc iframes after their content loads
+window.addEventListener('message', function(evt) {{
+  if (!evt.data || evt.data.type !== 'resize') return;
+  var iframe = document.getElementById(evt.data.id + '-iframe');
+  if (!iframe) return;
+  var h = Math.min(evt.data.h + 16, 600); // cap at 600px
+  iframe.style.minHeight = h + 'px';
+}});
 </script>
 </body>
 </html>
