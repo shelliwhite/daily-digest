@@ -1,2 +1,5 @@
 newspaper3k
 lxml_html_clean
+google-auth
+google-auth-oauthlib
+google-api-python-client
