@@ -477,7 +477,7 @@ def render_html(categories):
                     full_block = (
                         f'<iframe id="{cid}-iframe" srcdoc="{srcdoc}"'
                         f' sandbox="allow-popups allow-popups-to-escape-sandbox"'
-                        f' style="width:100%;border:none;min-height:200px;max-height:600px;"'
+                        f' style="width:100%;border:none;min-height:400px;max-height:852px;"'
                         f' loading="lazy"></iframe>'
                     )
                 else:
@@ -664,7 +664,7 @@ window.addEventListener('message', function(evt) {{
   if (!evt.data || evt.data.type !== 'resize') return;
   var iframe = document.getElementById(evt.data.id + '-iframe');
   if (!iframe) return;
-  var h = Math.min(evt.data.h + 16, 600);
+  var h = Math.min(evt.data.h + 16, 852);
   iframe.style.minHeight = h + 'px';
 }});
 </script>
