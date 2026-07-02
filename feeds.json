@@ -5,19 +5,14 @@
   "categories": [
     {
       "name": "News",
-      "feeds": [
-        {
-          "name": "AP News",
-          "url": "https://apnews.com/rss/apf-topnews"
-        }
-      ]
+      "feeds": []
     },
     {
       "name": "Books",
       "feeds": []
     },
     {
-      "name": "Tech",
+      "name": "Pop Culture",
       "feeds": []
     }
   ]
