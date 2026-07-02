@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 Daily Digest Generator
-Reads feeds.json, fetches recent entries from each RSS/Atom feed,
+Reads feeds.json, fetches recent entries from RSS feeds and Gmail,
 fetches full article content, and renders a styled index.html digest
 grouped by category with inline expand/collapse.
 """
 
+import base64
 import json
 import html
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -23,21 +25,6 @@ MAX_SUMMARY_LEN = 300       # chars shown in collapsed preview
 MAX_FULL_LEN = 6000         # chars stored for full expanded view (plain text only)
 FETCH_WORKERS = 6           # parallel article fetches
 USER_AGENT = "Mozilla/5.0 (compatible; NewsletterDigestBot/1.0)"
-
-# Tags allowed to pass through sanitize_html (everything else is stripped)
-ALLOWED_TAGS = {
-    "p", "br", "b", "strong", "i", "em", "u", "s", "strike",
-    "h1", "h2", "h3", "h4",
-    "ul", "ol", "li",
-    "a", "img",
-    "blockquote", "hr", "div", "span", "table", "tr", "td", "th", "tbody", "thead",
-}
-
-# Attributes allowed per tag (others stripped to prevent style/script injection)
-ALLOWED_ATTRS = {
-    "a":   {"href", "title"},
-    "img": {"src", "alt", "width", "height"},
-}
 
 
 # ---------------------------------------------------------------------------
@@ -76,96 +63,147 @@ def strip_html(raw):
     return text
 
 
-def sanitize_html(raw):
-    """
-    Sanitize email HTML for safe inline display, preserving images and formatting.
-
-    - Removes <style>, <script>, <head>, <html>, <body> wrapper tags
-    - Strips tracking pixels (images 1-3px wide/tall or explicitly 1x1)
-    - Keeps allowed tags (see ALLOWED_TAGS), strips the rest but keeps their text
-    - On allowed tags, keeps only safe attributes (see ALLOWED_ATTRS)
-    - Strips all inline style= attributes to prevent email CSS bleeding into the digest
-    - Makes relative URLs absolute where possible (skips them otherwise)
-    """
-    if not raw:
-        return ""
-
-    # Remove full block elements we never want
-    for tag in ("style", "script", "head"):
-        raw = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
-
-    # Unwrap <html> and <body> wrapper tags (keep their contents)
-    for tag in ("html", "body"):
-        raw = re.sub(rf"</?{tag}[^>]*>", "", raw, flags=re.IGNORECASE)
-
-    def process_tag(m):
-        full_tag = m.group(0)
-        # Closing tag — allow if tag is allowed
-        if full_tag.startswith("</"):
-            tag_name = re.match(r"</\s*(\w+)", full_tag)
-            if tag_name and tag_name.group(1).lower() in ALLOWED_TAGS:
-                return f"</{tag_name.group(1).lower()}>"
-            return ""
-
-        # Self-closing or opening tag
-        tag_match = re.match(r"<\s*(\w+)", full_tag)
-        if not tag_match:
-            return ""
-        tag_name = tag_match.group(1).lower()
-
-        if tag_name not in ALLOWED_TAGS:
-            return ""  # strip tag entirely (text content still flows through)
-
-        # Parse attributes
-        attrs_raw = full_tag[len(tag_match.group(0)):]
-        allowed = ALLOWED_ATTRS.get(tag_name, set())
-        kept_attrs = []
-
-        for attr_m in re.finditer(r'(\w[\w-]*)(?:\s*=\s*(?:"([^"]*)"\'([^\']*)\'|(\S+)))?', attrs_raw):
-            attr_name = attr_m.group(1).lower()
-            attr_val = attr_m.group(2) or attr_m.group(3) or attr_m.group(4) or ""
-
-            if attr_name not in allowed:
-                continue
-
-            # Block javascript: hrefs
-            if attr_name == "href" and attr_val.strip().lower().startswith("javascript:"):
-                continue
-
-            # Filter tracking pixels on img tags
-            if tag_name == "img" and attr_name in ("width", "height"):
-                try:
-                    if int(attr_val) <= 3:
-                        return ""  # drop the whole img tag
-                except ValueError:
-                    pass
-
-            kept_attrs.append(f'{attr_name}="{html.escape(attr_val)}"')
-
-        # For imgs, also check for common 1x1 tracking patterns in src
-        if tag_name == "img":
-            src_m = re.search(r'src\s*=\s*["\']?([^"\'>\s]+)', full_tag, re.IGNORECASE)
-            if src_m:
-                src = src_m.group(1).lower()
-                if any(x in src for x in ("pixel", "track", "beacon", "open.php", "1x1")):
-                    return ""
-
-        self_closing = "/" in full_tag[-3:] or tag_name in ("img", "br", "hr")
-        attrs_str = (" " + " ".join(kept_attrs)) if kept_attrs else ""
-        return f"<{tag_name}{attrs_str}{'/' if self_closing else ''}>"
-
-    sanitized = re.sub(r"<[^>]+>", process_tag, raw)
-
-    # Collapse excessive whitespace but preserve paragraph breaks
-    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
-    sanitized = re.sub(r"[ \t]+", " ", sanitized)
-    return sanitized.strip()
-
-
 def truncate(text, length):
     if len(text) <= length:
         return text
     return text[:length].rsplit(" ", 1)[0] + "…"
+
+
+# ---------------------------------------------------------------------------
+# Gmail API
+# ---------------------------------------------------------------------------
+
+def get_gmail_service():
+    """Build an authenticated Gmail API service using env var credentials."""
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    creds = Credentials(
+        token=None,
+        refresh_token=os.environ["GMAIL_REFRESH_TOKEN"],
+        client_id=os.environ["GMAIL_CLIENT_ID"],
+        client_secret=os.environ["GMAIL_CLIENT_SECRET"],
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+    return build("gmail", "v1", credentials=creds)
+
+
+def get_email_html(service, msg_id):
+    """Fetch the HTML body of a Gmail message by ID."""
+    msg = service.users().messages().get(
+        userId="me", id=msg_id, format="full"
+    ).execute()
+
+    def find_html(parts):
+        for part in parts:
+            if part.get("mimeType") == "text/html":
+                data = part.get("body", {}).get("data", "")
+                if data:
+                    return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+            if "parts" in part:
+                result = find_html(part["parts"])
+                if result:
+                    return result
+        return ""
+
+    payload = msg.get("payload", {})
+    # Single-part message
+    if payload.get("mimeType") == "text/html":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+    # Multi-part message
+    return find_html(payload.get("parts", []))
+
+
+def fetch_gmail_entries(gmail_config, cutoff):
+    """Fetch recent emails from Gmail matching the configured label."""
+    try:
+        service = get_gmail_service()
+    except Exception as e:
+        print(f"  [warn] Gmail auth failed: {e}")
+        return []
+
+    label = gmail_config.get("label", "Daily Digest")
+    after_ts = int(cutoff.timestamp())
+
+    # Search for messages with the label received after cutoff
+    query = f"after:{after_ts}"
+    try:
+        results = service.users().messages().list(
+            userId="me",
+            labelIds=[],
+            q=query,
+            maxResults=50,
+        ).execute()
+    except Exception as e:
+        print(f"  [warn] Gmail list failed: {e}")
+        return []
+
+    # Find the label ID for our label name
+    try:
+        labels_resp = service.users().labels().list(userId="me").execute()
+        label_map = {l["name"]: l["id"] for l in labels_resp.get("labels", [])}
+        label_id = label_map.get(label)
+        if not label_id:
+            print(f"  [warn] Gmail label '{label}' not found. Available: {list(label_map.keys())}")
+            return []
+    except Exception as e:
+        print(f"  [warn] Gmail labels fetch failed: {e}")
+        return []
+
+    # Re-fetch with label filter
+    try:
+        results = service.users().messages().list(
+            userId="me",
+            labelIds=[label_id],
+            q=query,
+            maxResults=50,
+        ).execute()
+    except Exception as e:
+        print(f"  [warn] Gmail label search failed: {e}")
+        return []
+
+    messages = results.get("messages", [])
+    print(f"  Gmail [{label}]: {len(messages)} messages found")
+
+    entries = []
+    for msg_ref in messages:
+        try:
+            msg = service.users().messages().get(
+                userId="me", id=msg_ref["id"], format="metadata",
+                metadataHeaders=["Subject", "From", "Date"]
+            ).execute()
+
+            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            subject = headers.get("Subject", "(no subject)")
+            sender = headers.get("From", "")
+            date_str = headers.get("Date", "")
+
+            # Extract sender name from "Name <email>" format
+            sender_name = re.match(r'^"?([^"<]+)"?\s*<', sender)
+            source = sender_name.group(1).strip() if sender_name else sender.split("@")[0]
+
+            date = parse_date(date_str)
+            email_html = get_email_html(service, msg_ref["id"])
+            plain_len = len(strip_html(email_html))
+
+            entries.append({
+                "title": subject,
+                "link": f"https://mail.google.com/mail/u/0/#inbox/{msg_ref['id']}",
+                "summary": truncate(strip_html(email_html), MAX_SUMMARY_LEN),
+                "feed_content": email_html,
+                "date": date,
+                "source": source,
+                "full_content": email_html if plain_len >= 100 else "",
+                "full_is_html": plain_len >= 100,
+            })
+            print(f"    {subject[:50]} — {plain_len} plain chars")
+
+        except Exception as e:
+            print(f"  [warn] failed to fetch Gmail message {msg_ref['id']}: {e}")
+
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -177,23 +215,13 @@ def truncate(text, length):
 def extract_full_content(url, feed_content=""):
     """Fetch and extract article body.
 
-    For Kill the Newsletter feeds, the full email HTML is already in the RSS
-    feed — inject it raw into a sandboxed iframe so it renders exactly as the
-    sender designed it. The iframe sandbox handles isolation; no sanitization needed.
-    For all other sources, newspaper3k fetches and extracts plain text.
+    Gmail entries already have full_content set directly — this function
+    is only called for RSS feed entries.
+    For all sources, newspaper3k fetches and extracts plain text.
 
     Returns a tuple: (content: str, is_html: bool)
     """
-    # Kill the Newsletter: use raw feed HTML directly — iframe sandbox handles isolation
-    if "kill-the-newsletter.com" in url and feed_content:
-        plain_len = len(strip_html(feed_content))
-        if plain_len >= 100:
-            print(f"    [debug] {url[:60]} — raw feed HTML ({plain_len} plain chars)")
-            return feed_content, True
-        print(f"    [debug] {url[:60]} — feed content too short ({plain_len} chars)")
-        return "", False
-
-    # All other sources: fetch via newspaper3k (returns plain text)
+    # All sources: fetch via newspaper3k (returns plain text)
     try:
         from newspaper import Article
         article = Article(url)
@@ -219,14 +247,6 @@ def extract_full_content(url, feed_content=""):
 #
 # def extract_full_content(url, feed_content=""):
 #     """Fetch and extract article body using standard library only."""
-#     # Kill the Newsletter: sanitize feed HTML directly
-#     if "kill-the-newsletter.com" in url and feed_content:
-#         sanitized = sanitize_html(feed_content)
-#         plain_len = len(strip_html(feed_content))
-#         if plain_len >= 100:
-#             return sanitized, True
-#         return "", False
-#     # All other sources: extract <p> blocks from fetched page
 #     try:
 #         raw = fetch_url(url, timeout=12).decode("utf-8", errors="ignore")
 #         for tag in ("style", "script", "nav", "footer", "header", "aside"):
@@ -274,7 +294,7 @@ def parse_date(date_str):
 
 
 # ---------------------------------------------------------------------------
-# Feed parsing
+# RSS Feed parsing
 # ---------------------------------------------------------------------------
 
 def parse_feed(xml_bytes, source_name):
@@ -333,18 +353,18 @@ def parse_feed(xml_bytes, source_name):
 
 
 # ---------------------------------------------------------------------------
-# Feed + article collection
+# Entry collection
 # ---------------------------------------------------------------------------
 
 def collect_entries(feeds_config):
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     categories = []
-    all_recent = []
+    all_rss_entries = []  # only RSS entries need article fetch pass
 
-    # Pass 1: fetch all feeds
+    # RSS feeds — one category per configured category
     for cat in feeds_config["categories"]:
         cat_entries = []
-        for feed in cat["feeds"]:
+        for feed in cat.get("feeds", []):
             name, url = feed["name"], feed["url"]
             try:
                 raw = fetch_url(url)
@@ -354,22 +374,34 @@ def collect_entries(feeds_config):
                 continue
             recent = [e for e in parsed if e["date"] is None or e["date"] >= cutoff]
             cat_entries.extend(recent)
+            all_rss_entries.extend(recent)
             print(f"  {name}: {len(recent)} recent / {len(parsed)} total")
 
         cat_entries.sort(
             key=lambda e: e["date"] or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
         )
-        categories.append({"name": cat["name"], "entries": cat_entries})
-        all_recent.extend(cat_entries)
+        if cat_entries:
+            categories.append({"name": cat["name"], "entries": cat_entries})
 
-    # Pass 2: fetch full article content in parallel
-    if all_recent:
-        print(f"\nFetching full content for {len(all_recent)} articles...")
+    # Gmail entries — all fetched under one "Newsletters" category
+    if "gmail" in feeds_config:
+        print("\nFetching Gmail newsletters...")
+        gmail_entries = fetch_gmail_entries(feeds_config["gmail"], cutoff)
+        if gmail_entries:
+            gmail_entries.sort(
+                key=lambda e: e["date"] or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            categories.append({"name": "Newsletters", "entries": gmail_entries})
+
+    # Article fetch pass — RSS entries only
+    if all_rss_entries:
+        print(f"\nFetching full content for {len(all_rss_entries)} RSS articles...")
         with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
             future_to_entry = {
                 pool.submit(extract_full_content, e["link"], e.get("feed_content", "")): e
-                for e in all_recent
+                for e in all_rss_entries
                 if e["link"]
             }
             done = 0
@@ -387,8 +419,8 @@ def collect_entries(feeds_config):
                 if done % 5 == 0 or done == len(future_to_entry):
                     print(f"  {done}/{len(future_to_entry)} articles fetched")
 
-        with_content = sum(1 for e in all_recent if e["full_content"])
-        print(f"  {with_content}/{len(all_recent)} articles had extractable content")
+        with_content = sum(1 for e in all_rss_entries if e["full_content"])
+        print(f"  {with_content}/{len(all_rss_entries)} RSS articles had extractable content")
 
     return categories
 
@@ -418,9 +450,8 @@ def render_html(categories):
             if full:
                 preview = summary or truncate(strip_html(full) if is_html else full, MAX_SUMMARY_LEN)
                 if is_html:
-                    # Wrap in sandboxed srcdoc iframe so newsletter renders with
-                    # its own layout but cannot affect the digest page.
-                    # Auto-resize JS runs inside the iframe and posts height to parent.
+                    # Inject raw HTML into a sandboxed srcdoc iframe
+                    # Newsletter renders exactly as designed; sandbox blocks all JS
                     iframe_doc = (
                         "<!DOCTYPE html><html><head>"
                         "<meta charset=\"UTF-8\">"
@@ -570,8 +601,6 @@ def render_html(categories):
   .card-title {{ font-size: 1.05rem; margin: 0; line-height: 1.3; font-weight: 600; }}
   .card-preview {{ font-size: 0.88rem; color: var(--ink-soft); margin: 0; }}
   .card-full {{ margin-top: 4px; border-top: 1px solid var(--border); padding-top: 12px; }}
-
-  /* Plain text content (newspaper3k sources) */
   .card-full-text {{
     font-size: 0.9rem;
     line-height: 1.7;
@@ -581,53 +610,6 @@ def render_html(categories):
     overflow-y: auto;
     padding-right: 4px;
   }}
-
-  /* Sanitized HTML content (Kill the Newsletter sources) */
-  .card-full-html {{
-    font-size: 0.9rem;
-    line-height: 1.7;
-    color: var(--ink);
-    max-height: 520px;
-    overflow-y: auto;
-    padding-right: 4px;
-    overflow-x: hidden;
-  }}
-  /* Tame email images so they don't overflow the card */
-  .card-full-html img {{
-    max-width: 100%;
-    height: auto;
-    display: block;
-    margin: 8px 0;
-    border-radius: 4px;
-  }}
-  /* Rein in email table layouts */
-  .card-full-html table {{
-    width: 100% !important;
-    max-width: 100%;
-    table-layout: fixed;
-    border-collapse: collapse;
-    font-size: 0.88rem;
-  }}
-  .card-full-html td,
-  .card-full-html th {{
-    padding: 4px 8px;
-    word-break: break-word;
-    vertical-align: top;
-  }}
-  /* Tone down email headings so they don't dominate the card */
-  .card-full-html h1 {{ font-size: 1.15rem; margin: 12px 0 6px; }}
-  .card-full-html h2 {{ font-size: 1.05rem; margin: 10px 0 4px; }}
-  .card-full-html h3 {{ font-size: 0.95rem; margin: 8px 0 4px; }}
-  .card-full-html p  {{ margin: 0 0 8px; }}
-  .card-full-html a  {{ color: var(--accent); }}
-  .card-full-html blockquote {{
-    border-left: 3px solid var(--border);
-    margin: 8px 0;
-    padding: 4px 12px;
-    color: var(--ink-soft);
-    font-style: italic;
-  }}
-
   .card-actions {{
     display: flex;
     align-items: center;
@@ -682,7 +664,7 @@ window.addEventListener('message', function(evt) {{
   if (!evt.data || evt.data.type !== 'resize') return;
   var iframe = document.getElementById(evt.data.id + '-iframe');
   if (!iframe) return;
-  var h = Math.min(evt.data.h + 16, 600); // cap at 600px
+  var h = Math.min(evt.data.h + 16, 600);
   iframe.style.minHeight = h + 'px';
 }});
 </script>
