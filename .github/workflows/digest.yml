@@ -2,7 +2,7 @@ name: Generate Daily Digest
 
 on:
   schedule:
-    # Runs daily at 17:00 UTC. Adjust as you like.
+    # Runs daily at 17:00 UTC.
     - cron: "0 17 * * *"
   workflow_dispatch: {}  # lets you trigger manually from the Actions tab
 
@@ -12,6 +12,10 @@ permissions:
 jobs:
   build-digest:
     runs-on: ubuntu-latest
+    env:
+      GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+      GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+      GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
