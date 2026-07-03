@@ -4,28 +4,27 @@ A self-hosted, auto-updating daily digest of your newsletters and RSS feeds, gro
 
 ## How it works
 
-1. `feeds.json` lists your sources grouped into categories you define.
-2. `generate.py` fetches each feed, pulls entries from the last 24 hours, fetches the full article content for each entry using `newspaper3k`, and renders a styled `index.html`.
-3. A GitHub Action runs `generate.py` daily at 17:00 UTC and commits the updated page.
-4. GitHub Pages serves `index.html` at your public URL.
+1. `feeds.json` lists your RSS sources grouped into categories you define.
+2. Gmail newsletters are fetched directly via the Gmail API using a label you apply.
+3. `generate.py` fetches each source, pulls entries from the last 24 hours, and renders a styled `index.html`.
+4. A GitHub Action runs `generate.py` daily at 17:00 UTC and commits the updated page.
+5. GitHub Pages serves `index.html` at your public URL.
 
-Each card on the digest shows a short preview by default. If full content was extracted, a "Read more" button expands the article inline. "Collapse" folds it back. An "Open ↗" link is always available to go to the original source.
+Each card shows a short preview by default. "Read more" expands the full content inline. For Gmail newsletters, the email renders in a sandboxed iframe exactly as designed — all links open in new tabs, unsubscribe links are neutralized, and your email address is redacted. "Open ↗" links to the original source. "Save" saves an item for later; saved items expire after 7 days.
 
 ## One-time setup
 
 ### 1. Create the repo
 Go to github.com → New repository → name it `daily-digest` → Public → Create.
 
-### 2. Unzip and upload the files
+### 2. Upload the files
 Unzip `daily-digest.zip`. The `.github` folder is hidden by default — reveal it first:
 - **Mac**: open the unzipped folder in Finder, press **Cmd+Shift+.**
 - **Windows**: File Explorer → View tab → check "Hidden items"
 
-You should see 5 items: `feeds.json`, `generate.py`, `index.html`, `README.md`, and `.github`.
+On your repo's GitHub page, click **"Add file" → "Upload files"** and drag in the **contents** of the folder (not the folder itself). Commit the upload.
 
-On your repo's GitHub page, click **"Add file" → "Upload files"** and drag in the **contents** of the folder (not the folder itself — dragging the parent folder nests everything one level too deep). Commit the upload.
-
-> **Note:** If the `.github` folder doesn't survive the upload, create the workflow file manually: in your repo click "Add file" → "Create new file", type `.github/workflows/digest.yml` as the filename (GitHub creates the folders automatically as you type the slashes), paste in the workflow content, and commit.
+> **Tip:** If the `.github` folder doesn't survive upload, create the workflow file manually: "Add file" → "Create new file" → type `.github/workflows/digest.yml` as the filename → paste the workflow content → commit.
 
 ### 3. Enable GitHub Pages
 Settings → Pages → Source: "Deploy from a branch" → Branch `main`, folder `/ (root)` → Save.
@@ -35,69 +34,113 @@ Your digest will be live at `https://YOUR_USERNAME.github.io/daily-digest/` afte
 ### 4. Enable Actions permissions
 Settings → Actions → General → Workflow permissions → select **"Read and write permissions"** → Save.
 
-This lets the daily job commit the updated `index.html` back to the repo.
+### 5. Set up Gmail API
 
-### 5. Set up email-to-RSS for newsletters
-For newsletters that only arrive via email (no native RSS feed):
-1. Go to **kill-the-newsletter.com**.
-2. Enter a name (e.g. "Morning Brew") → get a unique forwarding email address and a matching RSS feed URL.
-3. Update your newsletter subscription to that forwarding address, or set up a forwarding rule from your real inbox to it.
-4. Add the RSS feed URL to `feeds.json` under the right category.
+#### Create a Google Cloud project
+1. Go to console.cloud.google.com → New Project → name it `daily-digest` → Create
+2. APIs & Services → Library → search "Gmail API" → Enable
+3. APIs & Services → OAuth consent screen → External → fill in app name and email → Save
+4. APIs & Services → Credentials → "+ Create Credentials" → OAuth client ID → **Web application** → add `https://developers.google.com/oauthplayground` as an authorized redirect URI → Create
 
-Blogs and Substacks usually have native RSS already — add their feed URL directly, no Kill the Newsletter step needed. Substack feeds follow the pattern `https://NAME.substack.com/feed`.
+#### Generate a refresh token
+1. Go to developers.google.com/oauthplayground
+2. Click the gear icon → check "Use your own OAuth credentials" → enter your web client Client ID and Secret → Close
+3. In Step 1, expand "Gmail API v1" → check `https://www.googleapis.com/auth/gmail.readonly` → Authorize APIs
+4. Sign in with the Gmail account that receives your newsletters
+5. Step 2 → "Exchange authorization code for tokens" → copy the `refresh_token` value
 
-### 6. Edit feeds.json
-Replace the placeholder entries with your real sources. Add as many categories and feeds as you like — just keep the JSON structure intact:
+#### Add GitHub Secrets
+Settings → Secrets and variables → Actions → add these secrets:
+- `GMAIL_REFRESH_TOKEN` — the refresh token from OAuth Playground
+- `GMAIL_CLIENT_ID` — from your web application credentials JSON
+- `GMAIL_CLIENT_SECRET` — from your web application credentials JSON
+- `GH_PAT` — a GitHub Fine-grained token with Contents read/write on this repo only (named `GH_PAT`, not `GITHUB_PAT`)
+- `DIGEST_EMAIL` — your newsletter email address(es), comma-separated (e.g. `name@gmail.com,name+newsletter@gmail.com`)
+
+### 6. Set up Gmail label and filters
+1. In Gmail, create a label called exactly `Daily Digest`
+2. For each newsletter, create a filter: Settings → Filters → Create new filter → enter the sender address → apply the `Daily Digest` label
+3. Filters only apply to new incoming mail — existing emails won't be labeled retroactively
+
+### 7. Edit feeds.json
+Replace the placeholder RSS feeds with your real sources. The `gmail` block at the top level controls Gmail fetching — set the label name if you used something other than `Daily Digest`:
 
 ```json
 {
+  "gmail": {
+    "label": "Daily Digest"
+  },
   "categories": [
     {
-      "name": "Finance",
+      "name": "News",
       "feeds": [
-        { "name": "My Newsletter", "url": "https://kill-the-newsletter.com/feeds/YOUR_ID.xml" },
-        { "name": "A Blog", "url": "https://example.com/feed.xml" }
-      ]
-    },
-    {
-      "name": "Tech",
-      "feeds": [
-        { "name": "My Substack", "url": "https://name.substack.com/feed" }
+        { "name": "Example Blog", "url": "https://example.com/feed.xml" }
       ]
     }
   ]
 }
 ```
 
-### 7. Trigger the first run
-Actions tab → "Generate Daily Digest" → "Run workflow." After ~1-2 minutes (newspaper3k adds some fetch time), check your Pages URL.
+Substack feeds follow the pattern `https://NAME.substack.com/feed`. Most blogs have a native RSS feed — add them directly here.
+
+### 8. Trigger the first run
+Actions tab → "Generate Daily Digest" → "Run workflow." After ~1-2 minutes, check your Pages URL.
 
 ## Customizing
 
-- **Lookback window**: change `LOOKBACK_DAYS = 1` in `generate.py` (currently 1 day).
-- **Schedule time**: change the cron line in `.github/workflows/digest.yml` (currently `0 17 * * *` = 17:00 UTC daily).
-- **Preview length**: `MAX_SUMMARY_LEN = 300` controls how many characters show in the collapsed card preview.
-- **Full content length**: `MAX_FULL_LEN = 6000` caps how much article text is stored per entry.
-- **Parallel fetches**: `FETCH_WORKERS = 6` controls how many articles are fetched simultaneously during generation.
-- **Styling**: all CSS lives in the `render_html()` function in `generate.py` — colors, fonts, card layout are all editable there.
+- **Lookback window**: change `LOOKBACK_DAYS = 1` in `generate.py`
+- **Schedule time**: change the cron line in `digest.yml` (currently `0 17 * * *` = 17:00 UTC daily)
+- **Saved item expiry**: change `SAVED_EXPIRE_DAYS = 7` in `generate.py`
+- **Preview length**: `MAX_SUMMARY_LEN = 300` controls collapsed card preview length
+- **Full content length**: `MAX_FULL_LEN = 6000` caps plain-text article extraction
+- **Parallel fetches**: `FETCH_WORKERS = 6` controls simultaneous RSS article fetches
+- **Styling**: all CSS is in the `render_html()` function in `generate.py`
 
 ## Swapping the content extractor
 
-`generate.py` ships with two article extraction implementations. `newspaper3k` is active by default. To switch to the lightweight custom extractor (no pip dependency):
+Two article extraction implementations are included for RSS feeds. `newspaper3k` is active by default. To switch to the lightweight custom extractor (no pip dependency):
 
-1. In `generate.py`, comment out the `newspaper3k` block (the `extract_full_content` function that imports `from newspaper import Article`).
-2. Uncomment the custom extractor block directly below it.
-3. In `.github/workflows/digest.yml`, remove the `pip install newspaper3k` step.
+1. Comment out the active `extract_full_content` function in `generate.py`
+2. Uncomment the custom extractor block below it
+3. Remove `newspaper3k` and `lxml_html_clean` from `requirements.txt`
 
 ## Dependencies
 
-- **Python 3.11** (provided by GitHub Actions, no local install needed)
-- **newspaper3k** — installed automatically by the GitHub Action via `pip install newspaper3k`
+- **Python 3.11** — provided by GitHub Actions
+- **newspaper3k** + **lxml_html_clean** — RSS article extraction
+- **google-auth**, **google-auth-oauthlib**, **google-api-python-client** — Gmail API
+
+All installed automatically by the Action via `pip install -r requirements.txt`.
 
 ## Troubleshooting
 
-- **Action runs but shows 0 entries**: check the Action log (Actions tab → latest run). It prints a per-feed entry count and a warning for any feed that fails to fetch.
-- **CSS junk in card summaries**: the strip_html function detects and discards this automatically. If it still appears, that feed's content is unusually structured — the full-content extractor should handle it better on the next run.
-- **"Read more" shows no content**: the article URL may have blocked the bot (403), be paywalled, or be JavaScript-rendered. The "Open ↗" link will still take you to the original.
-- **Some sites consistently 403**: try adding them via Kill the Newsletter instead of direct RSS, or accept that those sources won't have inline full content.
-- **Generation takes a long time**: with 20+ sources, fetching full content can take 1-2 minutes. This is normal and well within GitHub Actions' limits. Reduce `FETCH_WORKERS` if you hit rate limits on specific sites.
+- **0 entries / feeds failing**: check the Action log for per-feed warnings. Common causes: feed URL changed, server temporarily down.
+- **Gmail unauthorized_client error**: your `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` must match the credentials used to generate the refresh token (web application client, not desktop app client).
+- **Gmail label not found**: the label in `feeds.json` must match your Gmail label exactly, including capitalization.
+- **"Read more" shows no content**: the article URL may be paywalled or JS-rendered. "Open ↗" still links to the original.
+- **Generation slow**: fetching full content for 20+ RSS articles can take 1-2 minutes. Normal and within GitHub Actions limits.
+- **Pages deployment failing**: check githubstatus.com for incidents. If Pages source resets, go to Settings → Pages and set it back to "Deploy from a branch" → `main` → `/ (root)`.
+- **Save button failing**: ensure the `GH_PAT` secret is a fine-grained token with Contents read/write on the `daily-digest` repo. Tokens expire — see "Regenerating the PAT" below.
+
+## Regenerating the PAT
+
+Your GitHub Personal Access Token expires 6 months after creation. When it expires the "Save" button on cards will silently fail. GitHub will also send you an email warning ~7 days before expiry.
+
+### Steps to regenerate
+
+1. Go to **github.com → Settings** (your account settings, top right) → **Developer settings** → **Personal access tokens** → **Fine-grained tokens**
+2. Find the existing token (named whatever you called it when you created it) → click it → click **"Regenerate token"**
+3. Set a new expiration (another 6 months, or choose a longer period) → confirm regeneration
+4. Copy the new token value — you only see it once
+
+### Update the GitHub Secret
+
+1. Go to your `daily-digest` **repo** → **Settings** → **Secrets and variables** → **Actions**
+2. Find `GH_PAT` in the list → click the pencil/edit icon
+3. Paste the new token value → click **"Update secret"**
+
+That's it — no code changes needed. The next digest run will automatically use the new token.
+
+### Setting a calendar reminder
+
+Since GitHub sends an email warning ~7 days before expiry, you'll get a heads up. But it's worth setting a calendar reminder for ~5 months from now so you're not caught off guard if the email gets buried.
