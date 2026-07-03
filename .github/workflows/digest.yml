@@ -19,6 +19,7 @@ jobs:
       GH_PAT: ${{ secrets.GH_PAT }}
       GH_OWNER: ${{ github.repository_owner }}
       GH_REPO: daily-digest
+      DIGEST_EMAIL: ${{ secrets.DIGEST_EMAIL }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
