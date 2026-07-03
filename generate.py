@@ -3,7 +3,7 @@
 Daily Digest Generator
 Reads feeds.json, fetches recent entries from RSS feeds and Gmail,
 fetches full article content, and renders a styled index.html digest
-grouped by category with inline expand/collapse.
+grouped by category with inline expand/collapse and a Save for Later section.
 """
 
 import base64
@@ -19,12 +19,19 @@ import urllib.request
 import urllib.error
 
 LOOKBACK_DAYS = 1
+SAVED_EXPIRE_DAYS = 7
 FEEDS_FILE = "feeds.json"
+SAVED_FILE = "saved.json"
 OUTPUT_FILE = "index.html"
-MAX_SUMMARY_LEN = 300       # chars shown in collapsed preview
-MAX_FULL_LEN = 6000         # chars stored for full expanded view (plain text only)
-FETCH_WORKERS = 6           # parallel article fetches
+MAX_SUMMARY_LEN = 300
+MAX_FULL_LEN = 6000
+FETCH_WORKERS = 6
 USER_AGENT = "Mozilla/5.0 (compatible; NewsletterDigestBot/1.0)"
+
+# GitHub repo details for Save for Later API calls — injected into page JS
+GH_OWNER = os.environ.get("GH_OWNER", "")
+GH_REPO  = os.environ.get("GH_REPO", "")
+GH_PAT   = os.environ.get("GH_PAT", "")
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +57,6 @@ def fetch_url(url, timeout=30, retries=2):
 # ---------------------------------------------------------------------------
 
 def strip_html(raw):
-    """Remove all HTML tags, returning plain text."""
     if not raw:
         return ""
     text = re.sub(r"<style[^>]*>.*?</style>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
@@ -66,7 +72,44 @@ def strip_html(raw):
 def truncate(text, length):
     if len(text) <= length:
         return text
-    return text[:length].rsplit(" ", 1)[0] + "…"
+    return text[:length].rsplit(" ", 1)[0] + "..."
+
+
+# ---------------------------------------------------------------------------
+# Save for Later — load, expire, save
+# ---------------------------------------------------------------------------
+
+def load_saved():
+    """Load saved.json, expiring entries older than SAVED_EXPIRE_DAYS."""
+    if not os.path.exists(SAVED_FILE):
+        return []
+    try:
+        with open(SAVED_FILE) as f:
+            items = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SAVED_EXPIRE_DAYS)
+    kept = []
+    for item in items:
+        saved_at = item.get("saved_at", "")
+        try:
+            dt = datetime.fromisoformat(saved_at)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt >= cutoff:
+                kept.append(item)
+            else:
+                print(f"  [saved] expired: {item.get('title','')[:50]}")
+        except (ValueError, TypeError):
+            kept.append(item)  # keep if date unparseable
+    return kept
+
+
+def write_saved(items):
+    """Write the current saved list back to saved.json."""
+    with open(SAVED_FILE, "w") as f:
+        json.dump(items, f, indent=2, default=str)
+    print(f"  [saved] wrote {len(items)} items to {SAVED_FILE}")
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +117,8 @@ def truncate(text, length):
 # ---------------------------------------------------------------------------
 
 def get_gmail_service():
-    """Build an authenticated Gmail API service using env var credentials."""
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
-
     creds = Credentials(
         token=None,
         refresh_token=os.environ["GMAIL_REFRESH_TOKEN"],
@@ -89,7 +130,6 @@ def get_gmail_service():
 
 
 def get_email_html(service, msg_id):
-    """Fetch the HTML body of a Gmail message by ID."""
     msg = service.users().messages().get(
         userId="me", id=msg_id, format="full"
     ).execute()
@@ -107,17 +147,14 @@ def get_email_html(service, msg_id):
         return ""
 
     payload = msg.get("payload", {})
-    # Single-part message
     if payload.get("mimeType") == "text/html":
         data = payload.get("body", {}).get("data", "")
         if data:
             return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
-    # Multi-part message
     return find_html(payload.get("parts", []))
 
 
 def fetch_gmail_entries(gmail_config, cutoff):
-    """Fetch recent emails from Gmail matching the configured label."""
     try:
         service = get_gmail_service()
     except Exception as e:
@@ -127,20 +164,6 @@ def fetch_gmail_entries(gmail_config, cutoff):
     label = gmail_config.get("label", "Daily Digest")
     after_ts = int(cutoff.timestamp())
 
-    # Search for messages with the label received after cutoff
-    query = f"after:{after_ts}"
-    try:
-        results = service.users().messages().list(
-            userId="me",
-            labelIds=[],
-            q=query,
-            maxResults=50,
-        ).execute()
-    except Exception as e:
-        print(f"  [warn] Gmail list failed: {e}")
-        return []
-
-    # Find the label ID for our label name
     try:
         labels_resp = service.users().labels().list(userId="me").execute()
         label_map = {l["name"]: l["id"] for l in labels_resp.get("labels", [])}
@@ -152,12 +175,11 @@ def fetch_gmail_entries(gmail_config, cutoff):
         print(f"  [warn] Gmail labels fetch failed: {e}")
         return []
 
-    # Re-fetch with label filter
     try:
         results = service.users().messages().list(
             userId="me",
             labelIds=[label_id],
-            q=query,
+            q=f"after:{after_ts}",
             maxResults=50,
         ).execute()
     except Exception as e:
@@ -174,20 +196,15 @@ def fetch_gmail_entries(gmail_config, cutoff):
                 userId="me", id=msg_ref["id"], format="metadata",
                 metadataHeaders=["Subject", "From", "Date"]
             ).execute()
-
             headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
             subject = headers.get("Subject", "(no subject)")
             sender = headers.get("From", "")
             date_str = headers.get("Date", "")
-
-            # Extract sender name from "Name <email>" format
             sender_name = re.match(r'^"?([^"<]+)"?\s*<', sender)
             source = sender_name.group(1).strip() if sender_name else sender.split("@")[0]
-
             date = parse_date(date_str)
             email_html = get_email_html(service, msg_ref["id"])
             plain_len = len(strip_html(email_html))
-
             entries.append({
                 "title": subject,
                 "link": f"https://mail.google.com/mail/u/0/#inbox/{msg_ref['id']}",
@@ -199,7 +216,6 @@ def fetch_gmail_entries(gmail_config, cutoff):
                 "full_is_html": plain_len >= 100,
             })
             print(f"    {subject[:50]} — {plain_len} plain chars")
-
         except Exception as e:
             print(f"  [warn] failed to fetch Gmail message {msg_ref['id']}: {e}")
 
@@ -207,21 +223,11 @@ def fetch_gmail_entries(gmail_config, cutoff):
 
 
 # ---------------------------------------------------------------------------
-# Content extraction  —  TWO implementations, swap by commenting one block
+# Content extraction
 # ---------------------------------------------------------------------------
 
 # ── ACTIVE: newspaper3k ────────────────────────────────────────────────────
-# Requires: pip install newspaper3k lxml_html_clean  (in requirements.txt)
 def extract_full_content(url, feed_content=""):
-    """Fetch and extract article body.
-
-    Gmail entries already have full_content set directly — this function
-    is only called for RSS feed entries.
-    For all sources, newspaper3k fetches and extracts plain text.
-
-    Returns a tuple: (content: str, is_html: bool)
-    """
-    # All sources: fetch via newspaper3k (returns plain text)
     try:
         from newspaper import Article
         article = Article(url)
@@ -240,20 +246,15 @@ def extract_full_content(url, feed_content=""):
         print(f"    [debug] {url[:60]} — exception: {ex}")
         return "", False
 
-
 # ── COMMENTED OUT: lightweight custom extractor (no pip dependency) ────────
 # To switch: comment the newspaper3k block above and uncomment this block.
 # Also remove newspaper3k and lxml_html_clean from requirements.txt.
 #
 # def extract_full_content(url, feed_content=""):
-#     """Fetch and extract article body using standard library only."""
 #     try:
 #         raw = fetch_url(url, timeout=12).decode("utf-8", errors="ignore")
 #         for tag in ("style", "script", "nav", "footer", "header", "aside"):
-#             raw = re.sub(
-#                 rf"<{tag}[^>]*>.*?</{tag}>", " ", raw,
-#                 flags=re.DOTALL | re.IGNORECASE
-#             )
+#             raw = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
 #         paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", raw, re.DOTALL | re.IGNORECASE)
 #         cleaned = []
 #         for p in paragraphs:
@@ -348,7 +349,6 @@ def parse_feed(xml_bytes, source_name):
                 "full_content": "",
                 "full_is_html": False,
             })
-
     return entries
 
 
@@ -359,9 +359,8 @@ def parse_feed(xml_bytes, source_name):
 def collect_entries(feeds_config):
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     categories = []
-    all_rss_entries = []  # only RSS entries need article fetch pass
+    all_rss_entries = []
 
-    # RSS feeds — one category per configured category
     for cat in feeds_config["categories"]:
         cat_entries = []
         for feed in cat.get("feeds", []):
@@ -384,7 +383,6 @@ def collect_entries(feeds_config):
         if cat_entries:
             categories.append({"name": cat["name"], "entries": cat_entries})
 
-    # Gmail entries — all fetched under one "Newsletters" category
     if "gmail" in feeds_config:
         print("\nFetching Gmail newsletters...")
         gmail_entries = fetch_gmail_entries(feeds_config["gmail"], cutoff)
@@ -395,7 +393,6 @@ def collect_entries(feeds_config):
             )
             categories.append({"name": "Newsletters", "entries": gmail_entries})
 
-    # Article fetch pass — RSS entries only
     if all_rss_entries:
         print(f"\nFetching full content for {len(all_rss_entries)} RSS articles...")
         with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
@@ -426,10 +423,105 @@ def collect_entries(feeds_config):
 
 
 # ---------------------------------------------------------------------------
+# Card HTML helper — shared between main digest and saved section
+# ---------------------------------------------------------------------------
+
+def render_card(e, cid, show_save_btn=True, show_remove_btn=False):
+    date_str = e["date"].strftime("%b %d") if e.get("date") else ""
+    summary = e.get("summary", "")
+    full = e.get("full_content", "")
+    is_html = e.get("full_is_html", False)
+
+    # Serialize entry data for the save button (exclude full_content to keep size down)
+    save_data = json.dumps({
+        "title":        e.get("title", ""),
+        "link":         e.get("link", ""),
+        "source":       e.get("source", ""),
+        "summary":      summary,
+        "date":         e["date"].isoformat() if e.get("date") else "",
+        "full_content": full,
+        "full_is_html": is_html,
+    }, ensure_ascii=False)
+    save_data_escaped = html.escape(save_data, quote=True)
+
+    if full:
+        preview = summary or truncate(strip_html(full) if is_html else full, MAX_SUMMARY_LEN)
+        if is_html:
+            iframe_doc = (
+                "<!DOCTYPE html><html><head>"
+                "<meta charset=\"UTF-8\">"
+                "<style>"
+                "html,body{margin:0;padding:8px;font-family:sans-serif;font-size:14px;line-height:1.5;}"
+                "img{max-width:100%;height:auto;}"
+                "table{max-width:100%;width:100%!important;table-layout:fixed;}"
+                "td,th{word-break:break-word;}"
+                "a{color:#c1492d;}"
+                "</style>"
+                f"<script>"
+                f"window.addEventListener('load',function(){{"
+                f"  var h=document.documentElement.scrollHeight;"
+                f"  parent.postMessage({{type:'resize',id:'{cid}',h:h}},'*');"
+                f"}});"
+                f"</script>"
+                "</head><body>"
+                + full +
+                "</body></html>"
+            )
+            srcdoc = html.escape(iframe_doc, quote=True)
+            full_block = (
+                f'<iframe id="{cid}-iframe" srcdoc="{srcdoc}"'
+                f' sandbox="allow-popups allow-popups-to-escape-sandbox"'
+                f' style="width:100%;border:none;min-height:400px;max-height:852px;"'
+                f' loading="lazy"></iframe>'
+            )
+        else:
+            full_block = f'<div class="card-full-text">{html.escape(full)}</div>'
+
+        action_btns = f'<button class="btn-expand" onclick="toggleExpand(event, \'{cid}\')">Read more</button>'
+        action_btns += f' <a class="btn-link" href="{html.escape(e.get("link",""))}" target="_blank" rel="noopener">Open ↗</a>'
+        if show_save_btn:
+            action_btns += f' <button class="btn-save" onclick="saveForLater(event, this)" data-entry="{save_data_escaped}">Save</button>'
+        if show_remove_btn:
+            action_btns += f' <button class="btn-remove" onclick="removeSaved(event, this)" data-link="{html.escape(e.get("link",""))}">Remove</button>'
+
+        content_block = f"""
+              <p class="card-preview" id="{cid}-preview">{html.escape(preview)}</p>
+              <div class="card-full" id="{cid}-full" hidden>
+                {full_block}
+              </div>
+              <div class="card-actions">{action_btns}</div>"""
+
+    elif summary:
+        action_btns = f'<a class="btn-link" href="{html.escape(e.get("link",""))}" target="_blank" rel="noopener">Open ↗</a>'
+        if show_save_btn:
+            action_btns += f' <button class="btn-save" onclick="saveForLater(event, this)" data-entry="{save_data_escaped}">Save</button>'
+        if show_remove_btn:
+            action_btns += f' <button class="btn-remove" onclick="removeSaved(event, this)" data-link="{html.escape(e.get("link",""))}">Remove</button>'
+        content_block = f"""
+              <p class="card-preview">{html.escape(summary)}</p>
+              <div class="card-actions">{action_btns}</div>"""
+    else:
+        action_btns = f'<a class="btn-link" href="{html.escape(e.get("link",""))}" target="_blank" rel="noopener">Open ↗</a>'
+        if show_remove_btn:
+            action_btns += f' <button class="btn-remove" onclick="removeSaved(event, this)" data-link="{html.escape(e.get("link",""))}">Remove</button>'
+        content_block = f'<div class="card-actions">{action_btns}</div>'
+
+    return f"""
+            <div class="card" id="{cid}">
+              <div class="card-meta">
+                <span class="card-source">{html.escape(e.get("source",""))}</span>
+                <span class="card-date">{date_str}</span>
+              </div>
+              <h3 class="card-title">{html.escape(e.get("title",""))}</h3>
+              {content_block}
+            </div>"""
+
+
+# ---------------------------------------------------------------------------
 # HTML rendering
 # ---------------------------------------------------------------------------
 
-def render_html(categories):
+def render_html(categories, saved_items):
     generated_at = datetime.now(timezone.utc).strftime("%B %d, %Y at %H:%M UTC")
 
     cards_html = []
@@ -441,78 +533,7 @@ def render_html(categories):
         entry_cards = []
         for e in cat["entries"]:
             card_id += 1
-            cid = f"card-{card_id}"
-            date_str = e["date"].strftime("%b %d") if e["date"] else ""
-            summary = e["summary"]
-            full = e["full_content"]
-            is_html = e.get("full_is_html", False)
-
-            if full:
-                preview = summary or truncate(strip_html(full) if is_html else full, MAX_SUMMARY_LEN)
-                if is_html:
-                    # Inject raw HTML into a sandboxed srcdoc iframe
-                    # Newsletter renders exactly as designed; sandbox blocks all JS
-                    iframe_doc = (
-                        "<!DOCTYPE html><html><head>"
-                        "<meta charset=\"UTF-8\">"
-                        "<style>"
-                        "html,body{margin:0;padding:8px;font-family:sans-serif;"
-                        "font-size:14px;line-height:1.5;}"
-                        "img{max-width:100%;height:auto;}"
-                        "table{max-width:100%;width:100%!important;table-layout:fixed;}"
-                        "td,th{word-break:break-word;}"
-                        "a{color:#c1492d;}"
-                        "</style>"
-                        f"<script>"
-                        f"window.addEventListener('load',function(){{"
-                        f"  var h=document.documentElement.scrollHeight;"
-                        f"  parent.postMessage({{type:'resize',id:'{cid}',h:h}},'*');"
-                        f"}});"
-                        f"</script>"
-                        "</head><body>"
-                        + full +
-                        "</body></html>"
-                    )
-                    srcdoc = html.escape(iframe_doc, quote=True)
-                    full_block = (
-                        f'<iframe id="{cid}-iframe" srcdoc="{srcdoc}"'
-                        f' sandbox="allow-popups allow-popups-to-escape-sandbox"'
-                        f' style="width:100%;border:none;min-height:400px;max-height:852px;"'
-                        f' loading="lazy"></iframe>'
-                    )
-                else:
-                    full_block = f'<div class="card-full-text">{html.escape(full)}</div>'
-
-                content_block = f"""
-              <p class="card-preview" id="{cid}-preview">{html.escape(preview)}</p>
-              <div class="card-full" id="{cid}-full" hidden>
-                {full_block}
-              </div>
-              <div class="card-actions">
-                <button class="btn-expand" onclick="toggleExpand(event, '{cid}')">Read more</button>
-                <a class="btn-link" href="{html.escape(e['link'])}" target="_blank" rel="noopener">Open ↗</a>
-              </div>"""
-            elif summary:
-                content_block = f"""
-              <p class="card-preview">{html.escape(summary)}</p>
-              <div class="card-actions">
-                <a class="btn-link" href="{html.escape(e['link'])}" target="_blank" rel="noopener">Open ↗</a>
-              </div>"""
-            else:
-                content_block = f"""
-              <div class="card-actions">
-                <a class="btn-link" href="{html.escape(e['link'])}" target="_blank" rel="noopener">Open ↗</a>
-              </div>"""
-
-            entry_cards.append(f"""
-            <div class="card" id="{cid}">
-              <div class="card-meta">
-                <span class="card-source">{html.escape(e['source'])}</span>
-                <span class="card-date">{date_str}</span>
-              </div>
-              <h3 class="card-title">{html.escape(e['title'])}</h3>
-              {content_block}
-            </div>""")
+            entry_cards.append(render_card(e, f"card-{card_id}", show_save_btn=True))
 
         cards_html.append(f"""
         <section class="category">
@@ -522,7 +543,31 @@ def render_html(categories):
           </div>
         </section>""")
 
+    # Saved for Later section at the bottom
+    if saved_items:
+        saved_cards = []
+        for item in saved_items:
+            card_id += 1
+            # Re-parse date if stored as string
+            if item.get("date") and isinstance(item["date"], str):
+                item["date"] = parse_date(item["date"])
+            saved_cards.append(render_card(item, f"card-{card_id}", show_save_btn=False, show_remove_btn=True))
+
+        cards_html.append(f"""
+        <section class="category saved-section">
+          <h2 class="category-title">Saved for Later</h2>
+          <p class="saved-note">Items expire after {SAVED_EXPIRE_DAYS} days. Click Remove to delete immediately.</p>
+          <div class="card-grid">
+            {''.join(saved_cards)}
+          </div>
+        </section>""")
+
     body = "".join(cards_html) if cards_html else '<p class="empty">No recent entries found. Check back soon.</p>'
+
+    # Safely embed PAT into JS — only grants narrow write access to this repo
+    gh_owner_js = json.dumps(GH_OWNER)
+    gh_repo_js  = json.dumps(GH_REPO)
+    gh_pat_js   = json.dumps(GH_PAT)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -563,6 +608,8 @@ def render_html(categories):
   header p {{ color: var(--ink-soft); font-size: 0.9rem; margin: 0; }}
   main {{ max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }}
   .category {{ margin-bottom: 48px; }}
+  .saved-section {{ border-top: 2px solid var(--border); padding-top: 32px; }}
+  .saved-note {{ font-size: 0.82rem; color: var(--ink-soft); margin: -12px 0 16px; }}
   .category-title {{
     font-family: Georgia, "Times New Roman", serif;
     font-size: 1.4rem;
@@ -615,18 +662,24 @@ def render_html(categories):
     align-items: center;
     gap: 12px;
     margin-top: 4px;
+    flex-wrap: wrap;
   }}
-  .btn-expand {{
+  .btn-expand, .btn-save, .btn-remove {{
     background: none;
     border: none;
     padding: 0;
     font-size: 0.82rem;
     font-weight: 600;
-    color: var(--accent);
     cursor: pointer;
     letter-spacing: 0.01em;
   }}
+  .btn-expand {{ color: var(--accent); }}
   .btn-expand:hover {{ text-decoration: underline; }}
+  .btn-save {{ color: #2d7ac1; }}
+  .btn-save:hover {{ text-decoration: underline; }}
+  .btn-save:disabled {{ color: var(--ink-soft); cursor: default; }}
+  .btn-remove {{ color: #888; }}
+  .btn-remove:hover {{ color: var(--accent); text-decoration: underline; }}
   .btn-link {{
     font-size: 0.82rem;
     color: var(--ink-soft);
@@ -647,6 +700,11 @@ def render_html(categories):
 </main>
 <footer>Auto-generated by GitHub Actions</footer>
 <script>
+var GH_OWNER = {gh_owner_js};
+var GH_REPO  = {gh_repo_js};
+var GH_PAT   = {gh_pat_js};
+var SAVED_FILE = 'saved.json';
+
 function toggleExpand(evt, cid) {{
   evt.preventDefault();
   var btn = evt.target;
@@ -659,14 +717,90 @@ function toggleExpand(evt, cid) {{
   btn.textContent = expanded ? 'Read more' : 'Collapse';
 }}
 
-// Auto-resize srcdoc iframes after their content loads
 window.addEventListener('message', function(evt) {{
   if (!evt.data || evt.data.type !== 'resize') return;
   var iframe = document.getElementById(evt.data.id + '-iframe');
   if (!iframe) return;
-  var h = Math.min(evt.data.h + 16, 852);
-  iframe.style.minHeight = h + 'px';
+  iframe.style.minHeight = Math.min(evt.data.h + 16, 852) + 'px';
 }});
+
+// --- GitHub API helpers ---
+
+async function ghGetFile(path) {{
+  var resp = await fetch(
+    'https://api.github.com/repos/' + GH_OWNER + '/' + GH_REPO + '/contents/' + path,
+    {{ headers: {{ 'Authorization': 'token ' + GH_PAT, 'Accept': 'application/vnd.github.v3+json' }} }}
+  );
+  if (resp.status === 404) return {{ content: [], sha: null }};
+  if (!resp.ok) throw new Error('GitHub GET failed: ' + resp.status);
+  var data = await resp.json();
+  var content = JSON.parse(atob(data.content.replace(/\n/g, '')));
+  return {{ content: content, sha: data.sha }};
+}}
+
+async function ghPutFile(path, content, sha, message) {{
+  var body = {{
+    message: message,
+    content: btoa(unescape(encodeURIComponent(JSON.stringify(content, null, 2)))),
+  }};
+  if (sha) body.sha = sha;
+  var resp = await fetch(
+    'https://api.github.com/repos/' + GH_OWNER + '/' + GH_REPO + '/contents/' + path,
+    {{
+      method: 'PUT',
+      headers: {{ 'Authorization': 'token ' + GH_PAT, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' }},
+      body: JSON.stringify(body),
+    }}
+  );
+  if (!resp.ok) throw new Error('GitHub PUT failed: ' + resp.status);
+}}
+
+// --- Save for Later ---
+
+async function saveForLater(evt, btn) {{
+  evt.preventDefault();
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  try {{
+    var entry = JSON.parse(btn.getAttribute('data-entry'));
+    entry.saved_at = new Date().toISOString();
+    var file = await ghGetFile(SAVED_FILE);
+    var items = file.content;
+    // Avoid duplicates by link
+    if (items.some(function(i) {{ return i.link === entry.link; }})) {{
+      btn.textContent = 'Saved';
+      return;
+    }}
+    items.push(entry);
+    await ghPutFile(SAVED_FILE, items, file.sha, 'Save: ' + entry.title.substring(0, 60));
+    btn.textContent = 'Saved ✓';
+  }} catch(e) {{
+    console.error(e);
+    btn.disabled = false;
+    btn.textContent = 'Save failed';
+  }}
+}}
+
+// --- Remove Saved ---
+
+async function removeSaved(evt, btn) {{
+  evt.preventDefault();
+  btn.disabled = true;
+  btn.textContent = 'Removing...';
+  try {{
+    var link = btn.getAttribute('data-link');
+    var file = await ghGetFile(SAVED_FILE);
+    var items = file.content.filter(function(i) {{ return i.link !== link; }});
+    await ghPutFile(SAVED_FILE, items, file.sha, 'Remove saved item');
+    var card = btn.closest('.card');
+    if (card) card.style.opacity = '0.4';
+    btn.textContent = 'Removed';
+  }} catch(e) {{
+    console.error(e);
+    btn.disabled = false;
+    btn.textContent = 'Remove failed';
+  }}
+}}
 </script>
 </body>
 </html>
@@ -681,17 +815,23 @@ def main():
     with open(FEEDS_FILE, "r") as f:
         feeds_config = json.load(f)
 
-    print("Fetching feeds and articles...")
+    # Load and expire saved items
+    print("Loading saved items...")
+    saved_items = load_saved()
+    write_saved(saved_items)
+    print(f"  {len(saved_items)} saved items after expiry check")
+
+    print("\nFetching feeds and articles...")
     categories = collect_entries(feeds_config)
 
     print("\nRendering HTML...")
-    html_out = render_html(categories)
+    html_out = render_html(categories, saved_items)
 
     with open(OUTPUT_FILE, "w") as f:
         f.write(html_out)
 
     total = sum(len(c["entries"]) for c in categories)
-    print(f"Done. {total} entries written to {OUTPUT_FILE}")
+    print(f"Done. {total} entries + {len(saved_items)} saved written to {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
