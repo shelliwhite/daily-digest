@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -32,6 +33,13 @@ USER_AGENT = "Mozilla/5.0 (compatible; NewsletterDigestBot/1.0)"
 GH_OWNER = os.environ.get("GH_OWNER", "")
 GH_REPO  = os.environ.get("GH_REPO", "")
 GH_PAT   = os.environ.get("GH_PAT", "")
+
+# Email addresses to redact from newsletter content (comma-separated in env var)
+DIGEST_EMAILS = [
+    e.strip()
+    for e in os.environ.get("DIGEST_EMAIL", "").split(",")
+    if e.strip()
+]
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +431,83 @@ def collect_entries(feeds_config):
 
 
 # ---------------------------------------------------------------------------
+# Email HTML sanitization
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate unsubscribe / opt-out links
+UNSUB_PATTERNS = re.compile(
+    r'(unsubscribe|opt.?out|remove.?me|email.?preferences|manage.?subscription'
+    r'|notification.?settings|email.?settings|update.?preferences)',
+    re.IGNORECASE,
+)
+
+def sanitize_email_html(raw_html):
+    """Prepare raw email HTML for safe iframe injection:
+    1. Force all links to open in a new tab (target=_blank, rel=noopener)
+    2. Neutralize unsubscribe/optout links (disabled visually, href=#)
+    3. Redact configured email addresses from link URLs and plain text
+    """
+    if not raw_html:
+        return raw_html
+
+    ATTR_RE   = re.compile(r'href=(["\'])([^"\']*)\1', re.IGNORECASE)
+    ANCHOR_RE = re.compile(r'<a(\b[^>]*)>', re.IGNORECASE)
+    TAG_RE    = re.compile(r'(<[^>]+>)|([^<]+)')
+
+    def process_anchor(m):
+        # Work on the full matched tag without the closing >
+        attrs = m.group(1) or ""
+        tag_inner = "<a" + attrs  # e.g. <a href="..."
+
+        href_m = ATTR_RE.search(attrs)
+        if not href_m:
+            # No href — just ensure new tab
+            return tag_inner + ' target="_blank" rel="noopener noreferrer">'
+
+        quote = href_m.group(1)
+        href  = href_m.group(2)
+
+        # Neutralize unsubscribe / optout links
+        if UNSUB_PATTERNS.search(href):
+            new_attrs = ATTR_RE.sub('href="#"', attrs, count=1)
+            return '<a' + new_attrs + ' title="Unsubscribe link disabled" style="opacity:0.4;cursor:not-allowed;">'
+
+        # Redact email addresses from href (plain and URL-encoded)
+        new_href = href
+        for email in DIGEST_EMAILS:
+            new_href = re.sub(re.escape(email), '[redacted]', new_href, flags=re.IGNORECASE)
+            new_href = re.sub(re.escape(urllib.parse.quote(email)), '[redacted]', new_href, flags=re.IGNORECASE)
+            new_href = re.sub(re.escape(urllib.parse.quote(email, safe="")), '[redacted]', new_href, flags=re.IGNORECASE)
+        new_attrs = ATTR_RE.sub('href=' + quote + new_href + quote, attrs, count=1)
+
+        # Force new tab
+        if re.search(r'target=', new_attrs, re.IGNORECASE):
+            new_attrs = re.sub(r'target=(["\'])[^"\']*\1', 'target="_blank"', new_attrs, flags=re.IGNORECASE)
+        else:
+            new_attrs += ' target="_blank"'
+
+        # rel=noopener
+        if not re.search(r'rel=', new_attrs, re.IGNORECASE):
+            new_attrs += ' rel="noopener noreferrer"'
+
+        return "<a" + new_attrs + ">"
+
+    result = ANCHOR_RE.sub(process_anchor, raw_html)
+
+    # Redact email addresses from plain text (outside HTML tags)
+    def redact_text(m):
+        part = m.group(0)
+        if part.startswith('<'):
+            return part
+        for email in DIGEST_EMAILS:
+            part = re.sub(re.escape(email), '[redacted]', part, flags=re.IGNORECASE)
+        return part
+
+    result = TAG_RE.sub(redact_text, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Card HTML helper — shared between main digest and saved section
 # ---------------------------------------------------------------------------
 
@@ -464,7 +549,7 @@ def render_card(e, cid, show_save_btn=True, show_remove_btn=False):
                 f"}});"
                 f"</script>"
                 "</head><body>"
-                + full +
+                + sanitize_email_html(full) +
                 "</body></html>"
             )
             srcdoc = html.escape(iframe_doc, quote=True)
